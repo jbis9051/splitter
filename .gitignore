@@ -2,3 +2,5 @@
 *.png
 *.jpg
 /.idea
+!docs/*.jpg
+!docs/*.png

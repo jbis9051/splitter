@@ -54,7 +54,7 @@ fn main() {
             let pixel = rgb.get_pixel(x, y);
             color_distance(pixel, &WHITE) >= sensitivity
         });
-        
+
         objects.push(object);
     }
 
@@ -96,10 +96,10 @@ fn main() {
             object_pixels[i].insert([*x, *y]);
         }
     }
-    
+
     // now we want to find all background pixels
     // we begin by finding a background pixel outside of the bounding boxes
-    
+
     let background = {
         let mut background = None;
         for x in 0..rgb.width() {
@@ -123,16 +123,16 @@ fn main() {
             panic!("No background pixel found");
         }
     };
-    
+
     // now expand out
-    
+
     let background_color = rgb.get_pixel(background[0], background[1]);
-    
+
     assert_eq!(color_distance(background_color, &WHITE), 0.0); // for now
-    
+
     let mut discovered = vec![vec![false; rgb.height() as usize]; rgb.width() as usize];
-    
-    
+
+
     let background  = search_object(&rgb, background[0], background[1], &mut discovered, |x, y| {
         for pixels in &object_pixels {
             if pixels.contains(&[x, y]) {
@@ -141,7 +141,7 @@ fn main() {
         }
         true
     });
-    
+
     let background_set = HashSet::from_iter(background.clone());
 
     // find the center of each object
@@ -150,7 +150,7 @@ fn main() {
         // first we find the centeroid
 
         let [x_sum, y_sum] = object.iter().fold([0, 0], |[x_sum, y_sum], [x, y]| {
-            [x_sum + x, y_sum + y]
+            [x_sum + *x as u64, y_sum + *y as u64]
         });
         let center = [x_sum as f64 / object.len() as f64, y_sum as f64 / object.len() as f64];
 
@@ -209,11 +209,11 @@ fn main() {
         }
 
         let corners = [north, east, south, west];
-        
+
         (object, [min_x, min_y, max_x, max_y], corners)
     }).collect::<Vec<_>>();
 
-    
+
 
     let elapsed = start.elapsed();
     println!("Found {} objects in {:?}", objects.len(), elapsed);
@@ -226,13 +226,13 @@ fn main() {
     for (object, _, _) in &objects {
         for [x, y] in object {
             let initial = overlay.get_pixel(*x, *y);
-            let new = color_opacity_combine(initial, &RED, 0.8);
+            let new = color_opacity_combine(initial, &RED, 0.6);
             overlay.put_pixel(*x, *y, new);
         }
     }
-    
+
     // overlay green on all background pixels
-    
+
     for [x, y] in background {
         let initial = overlay.get_pixel(x, y);
         let new = color_opacity_combine(initial, &GREEN, 0.8);
@@ -322,10 +322,10 @@ fn main() {
                 let (x_floor, y_floor) = (x_orig.floor() as u32, y_orig.floor() as u32);
                 let (x_ceil, y_ceil) = (x_orig.ceil() as u32, y_orig.ceil() as u32);
 
-                overlay.put_pixel(x_floor, y_floor, ORANGE);
-                overlay.put_pixel(x_ceil, y_ceil, ORANGE);
-                overlay.put_pixel(x_floor, y_ceil, ORANGE);
-                overlay.put_pixel(x_ceil, y_floor, ORANGE);
+                //overlay.put_pixel(x_floor, y_floor, ORANGE);
+                //overlay.put_pixel(x_ceil, y_ceil, ORANGE);
+                //overlay.put_pixel(x_floor, y_ceil, ORANGE);
+                //overlay.put_pixel(x_ceil, y_floor, ORANGE);
 
 
                 //  if x == 0 || y == 0 || x == width_pixels - 1 || y == height_pixels - 1 {
@@ -338,9 +338,9 @@ fn main() {
                 rotated_interpolated.put_pixel(x, y, interpolated);
             }
         }
-        
+
         println!("Finished object {} in {:?}", i, start.elapsed());
-        
+
         rotated.save(format!("{}.png", i)).unwrap();
         rotated_interpolated.save(format!("{}-interpolated.png", i)).unwrap();
     }
@@ -460,13 +460,13 @@ fn bilinear_interpolation(image: &RgbImage, background: &HashSet<[u32; 2]>, x: f
     let (x_ceil, y_ceil) = (x.ceil() as u32, y.ceil() as u32);
 
     let (x_frac, y_frac) = (x - x_floor as f64, y - y_floor as f64);
-    
+
     let mut transparent = 0f64;
-    
+
     let mut r = 0f64;
     let mut g = 0f64;
     let mut b = 0f64;
-    
+
     let mut sampled = false;
 
     if !background.contains(&[x_floor, y_floor]) {
@@ -478,7 +478,7 @@ fn bilinear_interpolation(image: &RgbImage, background: &HashSet<[u32; 2]>, x: f
     } else {
         transparent += (1.0 - x_frac) * (1.0 - y_frac);
     }
-    
+
     if !background.contains(&[x_ceil, y_floor]) {
         sampled = true;
         let pixel = image.get_pixel(x_ceil, y_floor);
@@ -488,7 +488,7 @@ fn bilinear_interpolation(image: &RgbImage, background: &HashSet<[u32; 2]>, x: f
     } else {
         transparent += x_frac * (1.0 - y_frac);
     }
-    
+
     if !background.contains(&[x_floor, y_ceil]) {
         sampled = true;
         let pixel = image.get_pixel(x_floor, y_ceil);
@@ -498,7 +498,7 @@ fn bilinear_interpolation(image: &RgbImage, background: &HashSet<[u32; 2]>, x: f
     } else {
         transparent += (1.0 - x_frac) * y_frac;
     }
-    
+
     if !background.contains(&[x_ceil, y_ceil]) {
         sampled = true;
         let pixel = image.get_pixel(x_ceil, y_ceil);
@@ -508,17 +508,17 @@ fn bilinear_interpolation(image: &RgbImage, background: &HashSet<[u32; 2]>, x: f
     } else {
         transparent += x_frac * y_frac;
     }
-    
+
     if transparent > 0.0 {
         r += r * transparent;
         g += g * transparent;
         b += b * transparent;
     }
-    
+
     if !sampled {
         return WHITE;
     }
-    
+
     Rgb([r as u8, g as u8, b as u8])
 }
 
