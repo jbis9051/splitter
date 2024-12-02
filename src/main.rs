@@ -1,166 +1,116 @@
+mod constants;
+mod mask;
+mod alg;
+
 use std::cmp::max;
 use std::collections::HashSet;
-use image::{RgbImage, Rgb, GenericImageView};
-
-const WHITE: Rgb<u8> = Rgb([255, 255, 255]);
-const RED: Rgb<u8> = Rgb([255, 0, 0]);
-
-const GREEN: Rgb<u8> = Rgb([0, 255, 0]);
-
-const BLUE: Rgb<u8> = Rgb([0, 0, 255]);
-
-const YELLOW: Rgb<u8> = Rgb([255, 255, 0]);
-
-const ORANGE: Rgb<u8> = Rgb([255, 165, 0]);
-
-const PURPLE: Rgb<u8> = Rgb([128, 0, 128]);
+use image::{RgbImage, Rgb, GenericImageView, RgbaImage, Rgba};
+use crate::constants::{BLUE, GREEN, RED, WHITE, YELLOW};
+use crate::mask::Mask;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() < 2 {
-        println!("Usage: {} <image> [sensitivity]", args[0]);
+        println!("Usage: {} --debug <image> [sensitivity]", args[0]);
         std::process::exit(1);
     }
 
-    let path = &args[1];
-
-    let sensitivity = if args.len() > 2 {
-        args[2].parse().unwrap()
+    let debug = args[1] == "--debug";
+    let path = if debug {
+        &args[2]
     } else {
-        50.0
+        &args[1]
+    };
+
+    let sensitivity = if debug {
+        args.get(3).map(|s| s.parse().unwrap()).unwrap_or(50.0)
+    } else {
+        args.get(2).map(|s| s.parse().unwrap()).unwrap_or(50.0)
     };
 
     let image = image::open(path).unwrap();
-
     let rgb = image.into_rgb8();
 
     let start = std::time::Instant::now();
 
-    let mut objects = Vec::new();
-    let mut discovered = vec![vec![false; rgb.height() as usize]; rgb.width() as usize];
-
-    for (x, y, pixel) in rgb.enumerate_pixels() {
-        if discovered[x as usize][y as usize] {
-            continue;
-        }
-
-        let distance = color_distance(pixel, &WHITE);
-        if distance < sensitivity {
-            discovered[x as usize][y as usize] = true;
-            continue;
-        }
-        let object = search_object(&rgb, x, y, &mut discovered, |x, y| {
-            let pixel = rgb.get_pixel(x, y);
-            color_distance(pixel, &WHITE) >= sensitivity
-        });
-
-        objects.push(object);
-    }
-
-    let bounding_boxes: Vec<[u32; 4]> = objects.iter().map(|object| {
-        let mut min_x = u32::MAX;
-        let mut min_y = u32::MAX;
+    // first we find each object using a simple flood fill algorithm
+    let objects = alg::find_objects(&rgb, &WHITE, sensitivity);
+    
+    // we then find the bounding box for each object for two purposes:
+    // 1. to filter out small objects
+    // 2. to find the corners of the rotated image (context hull finds us many points because the scan isn't perfect, but we just want the four corners)
+    let bounding_boxes: Vec<[usize; 4]> = objects.iter().map(|object| {
+        let mut min_x = usize::MAX;
+        let mut min_y = usize::MAX;
         let mut max_x = 0;
         let mut max_y = 0;
-        for [x, y] in object {
-            if *x < min_x {
-                min_x = *x;
-            }
-            if *x > max_x {
-                max_x = *x;
-            }
-            if *y < min_y {
-                min_y = *y;
-            }
-            if *y > max_y {
-                max_y = *y;
+
+        for y in 0..object.height() {
+            for x in 0..object.width() {
+                if !object.inside(x, y) {
+                    continue;
+                }
+                if x < min_x {
+                    min_x = x;
+                }
+                if x > max_x {
+                    max_x = x;
+                }
+                if y < min_y {
+                    min_y = y;
+                }
+                if y > max_y {
+                    max_y = y;
+                }
             }
         }
         [min_x, min_y, max_x, max_y]
     }).collect();
-
-    // filter out small objects
-
+    
     let objects: Vec<(_, _)> = objects.into_iter().zip(bounding_boxes).filter(|(_, [min_x, min_y, max_x, max_y])| {
         let width = max_x - min_x;
         let height = max_y - min_y;
         width > 30 && height > 30
     }).collect();
-
-    // lets create a set of pixels that are part of the object
-    let mut object_pixels = vec![HashSet::new(); objects.len()];
-
-    for (i, (object, _)) in objects.iter().enumerate() {
-        for [x, y] in object {
-            object_pixels[i].insert([*x, *y]);
+    
+    // now we use the context hull algorithm to get the full object
+    // because the original object search algorithm isn't perfect and won't include parts of the objects that are the same color as the background
+    let objects: Vec<(_, _, _)> = objects.iter().map(|(object, bounding_box)| {
+        let convex = alg::convex_hull(object);
+        
+        let mut convex_fill = Mask::new(object.width(), object.height());
+        
+        // first we connect all the points of the convex hull
+        for i in 0..convex.len() {
+            let next = (i + 1) % convex.len();
+            let [x1, y1] = convex[i];
+            let [x2, y2] = convex[next];
+            draw_line(x1 as u32, y1 as u32, x2 as u32, y2 as u32, |x, y| {
+                convex_fill[y.floor() as usize][x.floor() as usize] = true;
+            });
         }
-    }
-
-    // now we want to find all background pixels
-    // we begin by finding a background pixel outside of the bounding boxes
-
-    let background = {
-        let mut background = None;
-        for x in 0..rgb.width() {
-            for y in 0..rgb.height() {
-                let mut is_background = true;
-                for (_, [min_x, min_y, max_x, max_y]) in &objects {
-                    if x >= *min_x && x <= *max_x && y >= *min_y && y <= *max_y {
-                        is_background = false;
-                        break;
-                    }
-                }
-                if is_background {
-                    background = Some([x, y]);
-                    break;
-                }
-            }
-        }
-        if let Some([x, y]) = background {
-            [x, y]
-        } else {
-            panic!("No background pixel found");
-        }
-    };
-
-    // now expand out
-
-    let background_color = rgb.get_pixel(background[0], background[1]);
-
-    assert_eq!(color_distance(background_color, &WHITE), 0.0); // for now
-
-    let mut discovered = vec![vec![false; rgb.height() as usize]; rgb.width() as usize];
-
-
-    let background  = search_object(&rgb, background[0], background[1], &mut discovered, |x, y| {
-        for pixels in &object_pixels {
-            if pixels.contains(&[x, y]) {
-                return false;
-            }
-        }
-        true
-    });
-
-    let background_set = HashSet::from_iter(background.clone());
-
-    // find the center of each object
-
-    let objects = objects.into_iter().map(|(object, [min_x, min_y, max_x, max_y])| {
-        // first we find the centeroid
-
-        let [x_sum, y_sum] = object.iter().fold([0, 0], |[x_sum, y_sum], [x, y]| {
-            [x_sum + *x as u64, y_sum + *y as u64]
+        
+        // now we want to flood fill, but we need a starting point
+        // we can assume that the centroid of the bounding box is inside the object
+        let [min_x, min_y, max_x, max_y] = *bounding_box;
+        let x = (min_x as f64 + max_x as f64) / 2.0;
+        let y = (min_y as f64 + max_y as f64) / 2.0;
+        
+        // now we flood fill
+        let mut discovered: Mask = Mask::new(rgb.height() as usize, rgb.width() as usize);
+        let object = alg::search_object(&rgb, x as u32, y as u32, &mut discovered, |x, y| {
+            !convex_fill.inside(x as usize, y as usize)
         });
-        let center = [x_sum as f64 / object.len() as f64, y_sum as f64 / object.len() as f64];
-
-        (object, [min_x, min_y, max_x, max_y], center)
+        let object = Mask::combine(&[&object, &convex_fill]); // otherwise, we're shopping off the convex hull
+        (object, bounding_box, [x, y])
     }).collect::<Vec<_>>();
-
+    
     // now we need to find the corners of the rotated image
-
-    let objects = objects.into_iter().map(|(object, [min_x, min_y, max_x, max_y], center)| {
-        let center_pixel = [center[0] as u32, center[1] as u32];
+    // this basically finds the pixel furthest from the centroid that touches the bounding box, it's a bit hacky
+    let objects = objects.into_iter().map(|(object,bounding_box, center)| {
+        let center_pixel = [center[0] as usize, center[1] as usize];
+        let [min_x, min_y, max_x, max_y] = *bounding_box;
 
         let mut north = center_pixel;
         let mut north_distance = 0f64;
@@ -171,105 +121,116 @@ fn main() {
         let mut west = center_pixel;
         let mut west_distance = 0f64;
 
-        for [x, y] in &object {
-            // north
-            if *y == min_y {
-                let distance = pixel_distance([*x, *y], center);
-                if distance > north_distance {
-                    north = [*x, *y];
-                    north_distance = distance;
+        for y in 0..object.height() {
+            for x in 0..object.width() {
+                if !object.inside(x, y) {
+                    continue;
                 }
-            }
-            // south
-            if *y == max_y {
-                let distance = pixel_distance([*x, *y], center);
-                if distance > south_distance {
-                    south = [*x, *y];
-                    south_distance = distance;
-                }
-            }
 
-            // east
-            if *x == max_x {
-                let distance = pixel_distance([*x, *y], center);
-                if distance > east_distance {
-                    east = [*x, *y];
-                    east_distance = distance;
+                // north
+                if y == min_y {
+                    let distance = pixel_distance([x as f64, y as f64], center);
+                    if distance > north_distance {
+                        north = [x, y];
+                        north_distance = distance;
+                    }
                 }
-            }
+                // south
+                if y == max_y {
+                    let distance = pixel_distance([x as f64, y as f64], center);
+                    if distance > south_distance {
+                        south = [x, y];
+                        south_distance = distance;
+                    }
+                }
 
-            // west
-            if *x == min_x {
-                let distance = pixel_distance([*x, *y], center);
-                if distance > west_distance {
-                    west = [*x, *y];
-                    west_distance = distance;
+                // east
+                if x == max_x {
+                    let distance = pixel_distance([x as f64, y as f64], center);
+                    if distance > east_distance {
+                        east = [x, y];
+                        east_distance = distance;
+                    }
+                }
+
+                // west
+                if x == min_x {
+                    let distance = pixel_distance([x as f64, y as f64], center);
+                    if distance > west_distance {
+                        west = [x, y];
+                        west_distance = distance;
+                    }
                 }
             }
+            
         }
 
         let corners = [north, east, south, west];
-
+        
         (object, [min_x, min_y, max_x, max_y], corners)
     }).collect::<Vec<_>>();
-
+    
+    let mut background = Mask::combine(&objects.iter().map(|(object, _, _)| object).collect::<Vec<_>>());
+    background.invert();
 
 
     let elapsed = start.elapsed();
     println!("Found {} objects in {:?}", objects.len(), elapsed);
 
-
     // overlay red on all object pixels
 
     let mut overlay = rgb.clone();
+    let mut overlay_t = RgbaImage::new(overlay.width(), overlay.height());
 
     for (object, _, _) in &objects {
-        for [x, y] in object {
-            let initial = overlay.get_pixel(*x, *y);
-            let new = color_opacity_combine(initial, &RED, 0.6);
-            overlay.put_pixel(*x, *y, new);
+        for y in 0..object.height() {
+            for x in 0..object.width() {
+                if !object.inside(x, y) {
+                    continue
+                }
+                let (x, y) = (x as u32, y as u32);
+                let initial = overlay.get_pixel(x, y);
+                let new = color_opacity_combine(initial, &RED, 0.6);
+                overlay.put_pixel(x, y, new);
+            }
         }
     }
 
     // overlay green on all background pixels
-
-    for [x, y] in background {
-        let initial = overlay.get_pixel(x, y);
-        let new = color_opacity_combine(initial, &GREEN, 0.8);
-        overlay.put_pixel(x, y, new);
+    
+    for y in 0..background.height() {
+        for x in 0..background.width() {
+            if !background.inside(x, y) {
+                continue
+            }
+            let (x, y) = (x as u32, y as u32);
+            let initial = overlay.get_pixel(x, y);
+            let new = color_opacity_combine(initial, &GREEN, 0.6);
+            overlay.put_pixel(x, y, new);
+        }
     }
 
     // draw bounding box
 
     for (_, [min_x, min_y, max_x, max_y], _) in &objects {
         for x in *min_x..*max_x {
-            overlay.put_pixel(x, *min_y, RED);
-            overlay.put_pixel(x, *max_y, RED);
+            overlay.put_pixel(x as u32, *min_y as u32, RED);
+            overlay.put_pixel(x as u32, *max_y as u32, RED);
         }
         for y in *min_y..*max_y {
-            overlay.put_pixel(*min_x, y, RED);
-            overlay.put_pixel(*max_x, y, RED);
+            overlay.put_pixel(*min_x as u32, y as u32, RED);
+            overlay.put_pixel(*max_x as u32, y as u32, RED);
         }
     }
-
-    // highlight object pixels that intersect with bounding box
-
-    for (object, [min_x, min_y, max_x, max_y], _) in &objects {
-        for [x, y] in object {
-            if x == min_x || x == max_x || y == min_y || y == max_y {
-                overlay.put_pixel(*x, *y, GREEN);
-            }
-        }
-    }
-
-    // draw lines between corners
 
     for (_, _, corners) in &objects {
         for i in 0..4 {
             let next = (i + 1) % 4;
             let [x1, y1] = corners[i];
             let [x2, y2] = corners[next];
-            draw_line(&mut overlay, x1, y1, x2, y2, BLUE);
+            draw_line(x1 as u32, y1 as u32, x2 as u32, y2 as u32, |x, y| {
+                overlay.put_pixel(x as u32, y as u32, BLUE);
+            });
         }
     }
 
@@ -277,7 +238,22 @@ fn main() {
 
     for (_, _, corners) in &objects {
         for [x, y] in corners {
-            overlay.put_pixel(*x, *y, YELLOW);
+            overlay.put_pixel(*x as u32, *y as u32, YELLOW);
+        }
+    }
+
+    // draw our transparent overlay
+
+    for (object, _, _) in &objects {
+        for y in 0..object.height() {
+            for x in 0..object.width() {
+                if !object.inside(x, y) {
+                    continue
+                }
+                let (x, y) = (x as u32, y as u32);
+                let pixel = rgb.get_pixel(x, y);
+                overlay_t.put_pixel(x, y, Rgba([pixel[0], pixel[1], pixel[2], 255]));
+            }
         }
     }
 
@@ -285,10 +261,10 @@ fn main() {
 
     for (i, (_, _, corners)) in objects.iter().enumerate() {
         let start = std::time::Instant::now();
-        let north = corners[0];
-        let east = corners[1];
-        let south = corners[2];
-        let west = corners[3];
+        let north = [corners[0][0] as f64, corners[0][1] as f64];
+        let east = [corners[1][0] as f64, corners[1][1] as f64];
+        let south = [corners[2][0] as f64, corners[2][1] as f64];
+        let west = [corners[3][0] as f64, corners[3][1] as f64];
 
         let turning_clockwise = west[1] < east[1];
 
@@ -303,8 +279,8 @@ fn main() {
         let width_pixels = width.ceil() as u32;
         let height_pixels = height.ceil() as u32;
 
-        let mut rotated = RgbImage::new(width_pixels, height_pixels);
-        let mut rotated_interpolated = RgbImage::new(width_pixels, height_pixels);
+        let mut rotated_nn_interpolated = RgbImage::new(width_pixels, height_pixels);
+        let mut rotated_bi_interpolated = RgbImage::new(width_pixels, height_pixels);
 
         let x_angle = pixel_angle_for_rotation(upper_left, upper_right);
         let y_angle = pixel_angle_for_rotation(upper_left, lower_left);
@@ -318,65 +294,20 @@ fn main() {
                 let x_start = calculate_point_with_vector_and(upper_left, x_angle.0, x_angle.1, x_percent * width);
                 let [x_orig, y_orig] = calculate_point_with_vector_and(x_start, y_angle.0, y_angle.1, y_percent * height);
 
-
-                let (x_floor, y_floor) = (x_orig.floor() as u32, y_orig.floor() as u32);
-                let (x_ceil, y_ceil) = (x_orig.ceil() as u32, y_orig.ceil() as u32);
-
-                //overlay.put_pixel(x_floor, y_floor, ORANGE);
-                //overlay.put_pixel(x_ceil, y_ceil, ORANGE);
-                //overlay.put_pixel(x_floor, y_ceil, ORANGE);
-                //overlay.put_pixel(x_ceil, y_floor, ORANGE);
-
-
-                //  if x == 0 || y == 0 || x == width_pixels - 1 || y == height_pixels - 1 {
-                //    overlay.put_pixel(x_orig as u32, y_orig as u32, ORANGE);
-                //}
-
-                rotated.put_pixel(x, y, *rgb.get_pixel(x_orig as u32, y_orig as u32));
-
-                let interpolated = bilinear_interpolation(&rgb, &background_set, x_orig, y_orig);
-                rotated_interpolated.put_pixel(x, y, interpolated);
+                rotated_nn_interpolated.put_pixel(x, y, nearest_neighbor(&rgb, x_orig, y_orig));
+                rotated_bi_interpolated.put_pixel(x, y, bilinear_interpolation(&rgb, &background, x_orig, y_orig));
             }
         }
 
         println!("Finished object {} in {:?}", i, start.elapsed());
 
-        rotated.save(format!("{}.png", i)).unwrap();
-        rotated_interpolated.save(format!("{}-interpolated.png", i)).unwrap();
+        rotated_nn_interpolated.save(format!("{}-nn-interpolated.png", i)).unwrap();
+        rotated_bi_interpolated.save(format!("{}-bi-interpolated.png", i)).unwrap();
     }
+
 
     overlay.save("overlay.png").unwrap();
-}
-
-fn search_object(image: &RgbImage, start_x: u32, start_y: u32, discovered: &mut [Vec<bool>], inside: impl Fn(u32, u32) -> bool) -> Vec<[u32; 2]> {
-    let mut object = Vec::new();
-    let mut stack = Vec::new();
-    stack.push([start_x, start_y]);
-    while let Some([x, y]) = stack.pop() {
-        if x >= image.width() || y >= image.height() {
-            continue;
-        }
-        if discovered[x as usize][y as usize] {
-            continue;
-        }
-        discovered[x as usize][y as usize] = true;
-
-       if !inside(x, y) {
-            continue;
-        }
-
-        object.push([x, y]);
-
-        stack.push([x + 1, y]);
-        if x > 0 {
-            stack.push([x - 1, y]);
-        }
-        stack.push([x, y + 1]);
-        if y > 0 {
-            stack.push([x, y - 1]);
-        }
-    }
-    object
+    overlay_t.save("overlay-t.png").unwrap();
 }
 
 fn color_distance(color1: &Rgb<u8>, color2: &Rgb<u8>) -> f64 {
@@ -411,14 +342,14 @@ fn color_opacity_combine(color1: &Rgb<u8>, color2: &Rgb<u8>, opacity: f64) -> Rg
     Rgb([r as u8, g as u8, b as u8])
 }
 
-fn draw_line(image: &mut RgbImage, x1: u32, y1: u32, x2: u32, y2: u32, color: Rgb<u8>) {
+fn draw_line(x1: u32, y1: u32, x2: u32, y2: u32, mut draw: impl FnMut(f64, f64)) {
     let dx = x2 as i32 - x1 as i32;
     let dy = y2 as i32 - y1 as i32;
     let steps = max(dx.abs(), dy.abs());
     for step in 0..steps {
         let x = x1 as f64 + (dx as f64 / steps as f64) * step as f64;
         let y = y1 as f64 + (dy as f64 / steps as f64) * step as f64;
-        image.put_pixel(x as u32, y as u32, color);
+        draw(x, y);
     }
 }
 
@@ -450,14 +381,22 @@ fn calculate_point_with_vector_and<T: Into<f64> + Copy>(point: [T; 2], cos_theta
     [x_rotated, y_rotated]
 }
 
-fn bilinear_interpolation(image: &RgbImage, background: &HashSet<[u32; 2]>, x: f64, y: f64) -> Rgb<u8> {
+fn nearest_neighbor(image: &RgbImage, x: f64, y: f64) -> Rgb<u8> {
+    let x = x.round() as u32;
+    let y = y.round() as u32;
+    *image.get_pixel(x, y)
+}
+
+fn bilinear_interpolation(image: &RgbImage, background: &Mask, x: f64, y: f64) -> Rgb<u8> {
     // for fractional coordinates, we use bilinear interpolation
     // take the nearest pixel to the fractional coordinate
     // then take the neighboring pixel and weight them based on the distance
     // ignore pixels that are not in the object
 
     let (x_floor, y_floor) = (x.floor() as u32, y.floor() as u32);
+    let (x_floor_u, y_floor_u) = (x_floor as usize, y_floor as usize);
     let (x_ceil, y_ceil) = (x.ceil() as u32, y.ceil() as u32);
+    let (x_ceil_u, y_ceil_u) = (x_ceil as usize, y_ceil as usize);
 
     let (x_frac, y_frac) = (x - x_floor as f64, y - y_floor as f64);
 
@@ -469,7 +408,7 @@ fn bilinear_interpolation(image: &RgbImage, background: &HashSet<[u32; 2]>, x: f
 
     let mut sampled = false;
 
-    if !background.contains(&[x_floor, y_floor]) {
+    if !background.inside(x_floor_u, y_floor_u) {
         sampled = true;
         let pixel = image.get_pixel(x_floor, y_floor);
         r += pixel[0] as f64 * (1.0 - x_frac) * (1.0 - y_frac);
@@ -479,7 +418,7 @@ fn bilinear_interpolation(image: &RgbImage, background: &HashSet<[u32; 2]>, x: f
         transparent += (1.0 - x_frac) * (1.0 - y_frac);
     }
 
-    if !background.contains(&[x_ceil, y_floor]) {
+    if !background.inside(x_ceil_u, y_floor_u) {
         sampled = true;
         let pixel = image.get_pixel(x_ceil, y_floor);
         r += pixel[0] as f64 * x_frac * (1.0 - y_frac);
@@ -489,7 +428,7 @@ fn bilinear_interpolation(image: &RgbImage, background: &HashSet<[u32; 2]>, x: f
         transparent += x_frac * (1.0 - y_frac);
     }
 
-    if !background.contains(&[x_floor, y_ceil]) {
+    if !background.inside(x_floor_u, y_ceil_u) {
         sampled = true;
         let pixel = image.get_pixel(x_floor, y_ceil);
         r += pixel[0] as f64 * (1.0 - x_frac) * y_frac;
@@ -499,7 +438,7 @@ fn bilinear_interpolation(image: &RgbImage, background: &HashSet<[u32; 2]>, x: f
         transparent += (1.0 - x_frac) * y_frac;
     }
 
-    if !background.contains(&[x_ceil, y_ceil]) {
+    if !background.inside(x_ceil_u, y_ceil_u) {
         sampled = true;
         let pixel = image.get_pixel(x_ceil, y_ceil);
         r += pixel[0] as f64 * x_frac * y_frac;
