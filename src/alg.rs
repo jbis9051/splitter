@@ -1,3 +1,4 @@
+use std::cmp::max;
 use image::{Rgb, RgbImage};
 use crate::color_distance;
 use crate::mask::Mask;
@@ -60,57 +61,36 @@ pub fn search_object(image: &RgbImage, start_x: u32, start_y: u32, discovered: &
     object
 }
 
-
-pub fn convex_hull(mask: &Mask) -> Vec<[usize; 2]> {
-    let mut hull = Vec::new();
-
-    // Collect all points in the mask
-    let mut points = Vec::new();
-    for y in 0..mask.height() {
-        for x in 0..mask.width() {
-            if mask[y][x] {
-                points.push((x as i32, y as i32));
-            }
-        }
-    }
-
-    if points.len() < 3 {
-        return hull; // Convex hull is not possible
-    }
-
-    // Find the bottom-most point (and leftmost if tie)
-    let mut bottommost = 0;
-    for i in 1..points.len() {
-        if points[i].1 > points[bottommost].1 || (points[i].1 == points[bottommost].1 && points[i].0 < points[bottommost].0) {
-            bottommost = i;
-        }
-    }
-
-    let mut p = bottommost;
-    loop {
-        hull.push([points[p].0 as usize, points[p].1 as usize]);
-        let mut q = (p + 1) % points.len();
-        for i in 0..points.len() {
-            if orientation(points[p], points[i], points[q]) == 2 {
-                q = i;
-            }
-        }
-        p = q;
-        if p == bottommost {
-            break;
-        }
-    }
-
-    hull
+pub fn pixel_distance<T: Into<f64> + Copy, K: Into<f64> + Copy>(pixel1: [T; 2], pixel2: [K; 2]) -> f64 {
+    let dx = pixel1[0].into() - pixel2[0].into();
+    let dy = pixel1[1].into() - pixel2[1].into();
+    (dx * dx + dy * dy).sqrt()
 }
 
-fn orientation(p: (i32, i32), q: (i32, i32), r: (i32, i32)) -> i32 {
-    let val = (q.1 - p.1) * (r.0 - q.0) - (q.0 - p.0) * (r.1 - q.1);
-    if val == 0 {
-        return 0; // collinear
-    } else if val > 0 {
-        return 1; // clockwise
-    } else {
-        return 2; // counterclockwise
+pub fn color_opacity_combine(color1: &Rgb<u8>, color2: &Rgb<u8>, opacity: f64) -> Rgb<u8> {
+    let r = color1[0] as f64 * opacity + color2[0] as f64 * (1.0 - opacity);
+    let g = color1[1] as f64 * opacity + color2[1] as f64 * (1.0 - opacity);
+    let b = color1[2] as f64 * opacity + color2[2] as f64 * (1.0 - opacity);
+    Rgb([r as u8, g as u8, b as u8])
+}
+
+pub fn draw_line(x1: u32, y1: u32, x2: u32, y2: u32, mut draw: impl FnMut(f64, f64)) {
+    let dx = x2 as i32 - x1 as i32;
+    let dy = y2 as i32 - y1 as i32;
+    let steps = max(dx.abs(), dy.abs());
+    for step in 0..steps {
+        let x = x1 as f64 + (dx as f64 / steps as f64) * step as f64;
+        let y = y1 as f64 + (dy as f64 / steps as f64) * step as f64;
+        draw(x, y);
+    }
+}
+
+pub fn fix_edge_pixels(img: &mut RgbImage, edge_radius: u32, threshold: f64) {
+    // 1. we start by contracting the edge by edge_radius pixels, and then expanding until 0
+    // 2. for each iteration, we check if the pixel is an edge pixel, if not we skip
+    // 3. then we calculate the 3 inner neighbors gradient and see if the edge pixel is within the threshold
+    // 4. if it is not, then we repeat the first inner neighbor
+    for r in (0..edge_radius).rev() {
+        
     }
 }

@@ -2,7 +2,7 @@ use std::ops::{Deref, DerefMut};
 
 #[derive(Clone)]
 pub struct Mask {
-    pub mask: Vec<Vec<bool>>
+    pub mask: Vec<Vec<bool>>,
 }
 
 impl Deref for Mask {
@@ -48,8 +48,9 @@ impl Mask {
             }
         }
     }
-
-    pub fn combine(masks: &[&Mask]) -> Mask {
+    
+    pub fn combine<T>(masks: &[T]) -> Mask
+    where T: Deref<Target = Mask> {
         let mut out = masks[0].clone();
         for mask in masks.iter().skip(1) {
             for y in 0..mask.height() {
